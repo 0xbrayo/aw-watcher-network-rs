@@ -1,0 +1,7 @@
+# Configuration for aw-watcher-network-rs
+
+# Polling interval in seconds (default: 5)
+polling_interval = 5
+
+# Uncomment and modify the line below to change the polling interval
+# polling_interval = 10
