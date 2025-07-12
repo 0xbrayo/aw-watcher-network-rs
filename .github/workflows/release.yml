@@ -1,0 +1,203 @@
+name: Build Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  PROJECT_NAME: aw-watcher-network-rs
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      release_id: ${{ steps.create_release.outputs.id }}
+    steps:
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: true
+          prerelease: false
+
+  build-linux:
+    needs: create-release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          [
+            {
+              arch: "x86_64-unknown-linux-gnu",
+              name: "linux",
+              display: "Linux (x86_64)",
+            },
+          ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target.arch }}
+          override: true
+
+      - name: Install cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build
+        run: |
+          cross build --release --target ${{ matrix.target.arch }}
+
+      - name: Package
+        run: |
+          cd target/${{ matrix.target.arch }}/release
+          tar -czf ${{ env.PROJECT_NAME }}-${{ matrix.target.name }}.tar.gz ${{ env.PROJECT_NAME }}
+          cd -
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./target/${{ matrix.target.arch }}/release/${{ env.PROJECT_NAME }}-${{ matrix.target.name }}.tar.gz
+          asset_name: ${{ env.PROJECT_NAME }}-${{ matrix.target.name }}.tar.gz
+          asset_content_type: application/gzip
+
+  build-macos:
+    needs: create-release
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target:
+          [
+            {
+              arch: "x86_64-apple-darwin",
+              name: "macos",
+              display: "macOS (Intel)",
+            },
+          ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target.arch }}
+          override: true
+
+      - name: Build
+        run: |
+          cargo build --release --target ${{ matrix.target.arch }}
+
+      - name: Create Application Bundle
+        run: |
+          mkdir -p ${{ env.PROJECT_NAME }}.app/Contents/MacOS
+          mkdir -p ${{ env.PROJECT_NAME }}.app/Contents/Resources
+
+          echo '<?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key>
+            <string>'${{ env.PROJECT_NAME }}'</string>
+            <key>CFBundleIdentifier</key>
+            <string>net.activitywatch.'${{ env.PROJECT_NAME }}'</string>
+            <key>CFBundleName</key>
+            <string>'${{ env.PROJECT_NAME }}'</string>
+            <key>CFBundleIconFile</key>
+            <string>AppIcon</string>
+            <key>CFBundleShortVersionString</key>
+            <string>1.0</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleVersion</key>
+            <string>1</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>10.13</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>LSUIElement</key>
+            <true/>
+          </dict>
+          </plist>' > ${{ env.PROJECT_NAME }}.app/Contents/Info.plist
+
+          cp target/${{ matrix.target.arch }}/release/${{ env.PROJECT_NAME }} ${{ env.PROJECT_NAME }}.app/Contents/MacOS/
+
+          # Create DMG
+          hdiutil create -volname "${{ env.PROJECT_NAME }}" -srcfolder ${{ env.PROJECT_NAME }}.app -ov -format UDZO ${{ env.PROJECT_NAME }}-${{ matrix.target.name }}.dmg
+
+          # Create tar.gz as well
+          tar -czf ${{ env.PROJECT_NAME }}-${{ matrix.target.name }}.tar.gz ${{ env.PROJECT_NAME }}.app
+
+      - name: Upload DMG Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./${{ env.PROJECT_NAME }}-${{ matrix.target.name }}.dmg
+          asset_name: ${{ env.PROJECT_NAME }}-${{ matrix.target.name }}.dmg
+          asset_content_type: application/x-apple-diskimage
+
+      - name: Upload App Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./${{ env.PROJECT_NAME }}-${{ matrix.target.name }}.tar.gz
+          asset_name: ${{ env.PROJECT_NAME }}-${{ matrix.target.name }}-app.tar.gz
+          asset_content_type: application/gzip
+
+  build-windows:
+    needs: create-release
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        target:
+          [
+            {
+              arch: "x86_64-pc-windows-msvc",
+              name: "windows",
+              display: "Windows (x64)",
+            },
+          ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target.arch }}
+          override: true
+
+      - name: Build
+        run: |
+          cargo build --release --target ${{ matrix.target.arch }}
+
+      - name: Package
+        run: |
+          cd target/${{ matrix.target.arch }}/release
+          7z a -tzip ${{ env.PROJECT_NAME }}-${{ matrix.target.name }}.zip ${{ env.PROJECT_NAME }}.exe
+          cd -
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./target/${{ matrix.target.arch }}/release/${{ env.PROJECT_NAME }}-${{ matrix.target.name }}.zip
+          asset_name: ${{ env.PROJECT_NAME }}-${{ matrix.target.name }}.zip
+          asset_content_type: application/zip
