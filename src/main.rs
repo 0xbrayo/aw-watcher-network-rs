@@ -337,7 +337,7 @@ fn get_wifi_ssids() -> Result<(Option<String>, Vec<String>), String> {
 fn get_wifi_ssids_macos() -> Result<(Option<String>, Vec<String>), String> {
     // Check if Wi-Fi is enabled
     let wifi_status = Command::new("networksetup")
-        .args(&["-getairportpower", "en0"])
+        .args(["-getairportpower", "en0"])
         .output()
         .map_err(|e| format!("Failed to check Wi-Fi status: {}", e))?;
 
@@ -350,7 +350,7 @@ fn get_wifi_ssids_macos() -> Result<(Option<String>, Vec<String>), String> {
     if !wifi_enabled {
         wifi_was_disabled = true;
         Command::new("networksetup")
-            .args(&["-setairportpower", "en0", "on"])
+            .args(["-setairportpower", "en0", "on"])
             .output()
             .map_err(|e| format!("Failed to enable Wi-Fi: {}", e))?;
 
@@ -360,14 +360,14 @@ fn get_wifi_ssids_macos() -> Result<(Option<String>, Vec<String>), String> {
 
     // Use system_profiler to get Wi-Fi information
     let scan_output = Command::new("system_profiler")
-        .args(&["SPAirPortDataType"])
+        .args(["SPAirPortDataType"])
         .output()
         .map_err(|e| format!("Failed to scan Wi-Fi networks: {}", e))?;
 
     // Restore previous Wi-Fi state if it was disabled
     if wifi_was_disabled {
         Command::new("networksetup")
-            .args(&["-setairportpower", "en0", "off"])
+            .args(["-setairportpower", "en0", "off"])
             .output()
             .ok(); // Ignore errors here
     }
