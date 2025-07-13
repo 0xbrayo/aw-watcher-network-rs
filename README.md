@@ -1,5 +1,7 @@
 # aw-watcher-network-rs
 
+[![CI](https://github.com/0xbrayo/aw-watcher-network-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/0xbrayo/aw-watcher-network-rs/actions/workflows/ci.yml)
+
 A comprehensive network monitoring watcher for [ActivityWatch](https://activitywatch.net/). This watcher tracks your network connectivity status, reporting whether your device is online or offline, and on macOS and Linux, also scans for available Wi-Fi networks in your vicinity and identifies your currently connected network. It creates separate, well-organized buckets with the hostname appended to distinguish between multiple devices.
 
 ## Features
