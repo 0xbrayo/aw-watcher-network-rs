@@ -23,7 +23,7 @@ struct AppConfig {
     polling_interval: u64,
 
     /// Wi-Fi SSID scanning interval in seconds
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     #[serde(default = "default_wifi_scan_interval")]
     wifi_scan_interval: u64,
 }
@@ -32,7 +32,7 @@ fn default_polling_interval() -> u64 {
     5
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn default_wifi_scan_interval() -> u64 {
     300 // 5 minutes
 }
@@ -40,13 +40,13 @@ fn default_wifi_scan_interval() -> u64 {
 impl AppConfig {
     fn new() -> Result<Self, ConfigError> {
         // Start with default configuration
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         let default_config = Self {
             polling_interval: default_polling_interval(),
             wifi_scan_interval: default_wifi_scan_interval(),
         };
 
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         let default_config = Self {
             polling_interval: default_polling_interval(),
         };
@@ -101,7 +101,7 @@ fn main() {
                 wifi_scan_interval: default_wifi_scan_interval(),
             };
 
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
             let config = AppConfig {
                 polling_interval: default_polling_interval(),
             };
@@ -119,23 +119,23 @@ fn main() {
     };
 
     let bucket_id = format!("aw-watcher-network_{}", hostname);
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     let wifi_bucket_id = format!("aw-watcher-wifi_{}", hostname);
     let event_type = "network-status";
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     let wifi_event_type = "wifi-status";
 
     println!(
         "Starting aw-watcher-network-rs with polling interval of {} seconds",
         polling_interval
     );
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     println!(
         "Wi-Fi SSID scanning interval: {} seconds",
         config.wifi_scan_interval
     );
     println!("Using bucket ID: {}", bucket_id);
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     println!("Using Wi-Fi bucket ID: {}", wifi_bucket_id);
 
     let client = AwClient::new("localhost", 5600, "aw-watcher-network").unwrap();
@@ -145,13 +145,13 @@ fn main() {
         .create_bucket_simple(&bucket_id, event_type)
         .expect("Failed to create network bucket");
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     client
         .create_bucket_simple(&wifi_bucket_id, wifi_event_type)
         .expect("Failed to create Wi-Fi bucket");
 
     // Start Wi-Fi SSID scanning thread on supported platforms
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
         let wifi_scan_interval = config.wifi_scan_interval;
         // Create a new client instance for the WiFi thread since AwClient doesn't implement Clone
@@ -331,6 +331,122 @@ fn get_wifi_ssids() -> Result<(Option<String>, Vec<String>), String> {
     {
         get_wifi_ssids_linux()
     }
+
+    #[cfg(target_os = "windows")]
+    {
+        get_wifi_ssids_windows()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn get_wifi_ssids_windows() -> Result<(Option<String>, Vec<String>), String> {
+    // Check if WiFi is enabled
+    let wifi_status = Command::new("netsh")
+        .args(&["wlan", "show", "interfaces"])
+        .output()
+        .map_err(|e| format!("Failed to check WiFi status: {}", e))?;
+
+    let wifi_status_str = String::from_utf8_lossy(&wifi_status.stdout);
+    let wifi_was_enabled = !wifi_status_str.contains("Radio status:  Not ready");
+
+    // If WiFi is not enabled, enable it
+    if !wifi_was_enabled {
+        println!("WiFi is off. Temporarily enabling it for scanning...");
+        let _ = Command::new("netsh")
+            .args(&["wlan", "set", "interface", "enabled"])
+            .output()
+            .map_err(|e| format!("Failed to enable WiFi: {}", e))?;
+
+        // Give it a moment to initialize
+        sleep(Duration::from_secs(2));
+    }
+
+    // Get the list of all available WiFi networks
+    let output = Command::new("netsh")
+        .args(&["wlan", "show", "networks", "mode=bssid"])
+        .output()
+        .map_err(|e| format!("Failed to execute netsh command: {}", e))?;
+
+    // Get currently connected network
+    let connected_output = Command::new("netsh")
+        .args(&["wlan", "show", "interfaces"])
+        .output()
+        .map_err(|e| format!("Failed to get connected network: {}", e))?;
+
+    // If WiFi was initially disabled, turn it back off
+    if !wifi_was_enabled {
+        println!("Returning WiFi to its original disabled state...");
+        let _ = Command::new("netsh")
+            .args(&["wlan", "set", "interface", "disabled"])
+            .output()
+            .map_err(|e| format!("Failed to disable WiFi: {}", e))?;
+    }
+
+    parse_wifi_output_windows(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&connected_output.stdout),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn parse_wifi_output_windows(
+    networks_output: &str,
+    connected_output: &str,
+) -> Result<(Option<String>, Vec<String>), String> {
+    let mut ssids = Vec::new();
+    let mut connected_ssid = None;
+
+    // Parse the connected SSID from interfaces output
+    let ssid_regex = Regex::new(r"SSID\s+:\s+(.+)").map_err(|e| format!("Regex error: {}", e))?;
+    let state_regex =
+        Regex::new(r"State\s+:\s+connected").map_err(|e| format!("Regex error: {}", e))?;
+
+    let mut is_connected = false;
+
+    // Process the connected output by lines
+    for line in connected_output.lines() {
+        if state_regex.is_match(line) {
+            is_connected = true;
+        }
+
+        if is_connected {
+            if let Some(caps) = ssid_regex.captures(line) {
+                if let Some(ssid_match) = caps.get(1) {
+                    connected_ssid = Some(ssid_match.as_str().trim().to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    // If there are no networks in the output, return empty list
+    if networks_output.contains("No networks exist")
+        || networks_output.contains("The wireless interface is powered down")
+    {
+        return Ok((connected_ssid, ssids));
+    }
+
+    // Parse available networks
+    let network_name_regex =
+        Regex::new(r"SSID\s+\d+\s+:\s+(.+)").map_err(|e| format!("Regex error: {}", e))?;
+
+    // Process the networks output by lines
+    for line in networks_output.lines() {
+        if let Some(caps) = network_name_regex.captures(line) {
+            if let Some(ssid_match) = caps.get(1) {
+                let ssid = ssid_match.as_str().trim().to_string();
+                if !ssid.is_empty() && !ssids.contains(&ssid) {
+                    ssids.push(ssid);
+                }
+            }
+        }
+    }
+
+    // Deduplicate SSIDs (just in case)
+    ssids.sort();
+    ssids.dedup();
+
+    Ok((connected_ssid, ssids))
 }
 
 #[cfg(target_os = "macos")]

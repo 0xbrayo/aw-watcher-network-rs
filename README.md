@@ -2,18 +2,18 @@
 
 [![CI](https://github.com/0xbrayo/aw-watcher-network-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/0xbrayo/aw-watcher-network-rs/actions/workflows/ci.yml)
 
-A comprehensive network monitoring watcher for [ActivityWatch](https://activitywatch.net/). This watcher tracks your network connectivity status, reporting whether your device is online or offline, and on macOS and Linux, also scans for available Wi-Fi networks in your vicinity and identifies your currently connected network. It creates separate, well-organized buckets with the hostname appended to distinguish between multiple devices.
+A comprehensive network monitoring watcher for [ActivityWatch](https://activitywatch.net/). This watcher tracks your network connectivity status, reporting whether your device is online or offline, and also scans for available Wi-Fi networks in your vicinity and identifies your currently connected network on macOS, Linux, and Windows. It creates separate, well-organized buckets with the hostname appended to distinguish between multiple devices.
 
 ## Features
 
 - Monitors network connectivity by checking connection to major DNS servers
 - Reports online/offline status to ActivityWatch
-- Scans and reports available Wi-Fi networks in your area (macOS and Linux only)
-- Identifies and displays your currently connected Wi-Fi network (macOS and Linux only)
+- Scans and reports available Wi-Fi networks in your area
+- Identifies and displays your currently connected Wi-Fi network
 - Configurable polling intervals for both network checks and Wi-Fi scans
 - Device-specific buckets with hostname in bucket ID
 - Handles Wi-Fi state (turns on if off, then returns to previous state) on supported platforms
-- Cross-platform support with native command integration (Wi-Fi features on macOS and Linux only)
+- Cross-platform support with native command integration using platform-specific tools
 - Minimizes system impact by managing Wi-Fi resources efficiently
 
 ## Installation
@@ -41,7 +41,7 @@ If this file doesn't exist when the watcher starts, it will be created automatic
 | Option | Description | Default | Platform |
 |--------|-------------|---------|----------|
 | `polling_interval` | How often to check network status (in seconds) | `5` | All |
-| `wifi_scan_interval` | How often to scan for Wi-Fi networks (in seconds) | `300` | macOS, Linux |
+| `wifi_scan_interval` | How often to scan for Wi-Fi networks (in seconds) | `300` | All |
 
 ### Example Configuration
 
@@ -56,15 +56,7 @@ polling_interval = 10
 wifi_scan_interval = 300
 ```
 
-#### Windows Configuration
 
-On Windows, the configuration is simpler as Wi-Fi scanning is not supported:
-
-```toml
-# Configuration for aw-watcher-network-rs
-
-# Polling interval in seconds
-polling_interval = 10
 ```
 
 ## Usage
@@ -78,7 +70,7 @@ Simply run the executable:
 The watcher will start sending network connectivity events to your local ActivityWatch server (ensure your ActivityWatch server is running). Events are stored in the following buckets:
 
 - `aw-watcher-network_<hostname>` - Contains online/offline connectivity status (all platforms)
-- `aw-watcher-wifi_<hostname>` - Contains available Wi-Fi networks and signal information (macOS and Linux only)
+- `aw-watcher-wifi_<hostname>` - Contains available Wi-Fi networks and signal information
 
 This separation allows for better organization, independent querying, and enhanced visualization of different types of network data in the ActivityWatch dashboard.
 
@@ -94,9 +86,9 @@ On supported platforms (macOS and Linux), the watcher periodically scans for ava
 
 - **macOS**: Uses `networksetup` to manage Wi-Fi power state and `system_profiler SPAirPortDataType` to scan for networks and identify the connected network, ensuring compatibility with all macOS versions
 - **Linux**: Primarily uses `nmcli` (NetworkManager) with fallback to `iwlist` for broader compatibility across different Linux distributions
-- **Windows**: Wi-Fi scanning is not currently supported
+- **Windows**: Uses `netsh wlan` commands to scan for networks and identify the connected network, with intelligent power management for WiFi adapters
 
-If Wi-Fi is disabled, the watcher will:
+If Wi-Fi is disabled on any platform (macOS, Linux, or Windows), the watcher will:
 1. Detect the disabled state
 2. Temporarily enable the Wi-Fi interface
 3. Perform the scan (with appropriate timeouts)
@@ -121,10 +113,7 @@ If you encounter issues with Wi-Fi scanning on supported platforms:
 - On Linux, make sure either NetworkManager (`nmcli`) or Wireless Tools (`iwlist`) is installed
 - On macOS, no additional software is required as the implementation uses built-in system tools
 
-### Windows-Specific Notes
 
-- Wi-Fi scanning is not currently supported on Windows platforms
-- Only the network connectivity features are available on Windows
 
 ## Contributing
 
