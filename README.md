@@ -27,6 +27,7 @@ A comprehensive network monitoring watcher for [ActivityWatch](https://activityw
    cargo build --release
    ```
 3. The binary will be available at `target/release/aw-watcher-network-rs`
+4. You can install the binary to your PATH with `cargo install --path .`
 
 ## Configuration
 
