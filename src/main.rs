@@ -42,7 +42,6 @@ impl AppConfig {
             wifi_scan_interval: default_wifi_scan_interval(),
         };
 
-
         // Get the configuration directory
         let config_path = if let Some(config_dir) = config_dir() {
             let aw_config_dir = config_dir.join("activitywatch").join("aw-watcher-network");
@@ -87,13 +86,11 @@ fn main() {
         Ok(config) => config,
         Err(e) => {
             eprintln!("Error loading configuration: {}", e);
-            let config = AppConfig {
+
+            AppConfig {
                 polling_interval: default_polling_interval(),
                 wifi_scan_interval: default_wifi_scan_interval(),
-            };
-
-
-            config
+            }
         }
     };
 
@@ -650,7 +647,8 @@ fn parse_connected_ssid_windows(output: &str) -> Option<String> {
 #[cfg(target_os = "windows")]
 fn parse_wifi_output_windows(output: &str) -> Result<Vec<String>, String> {
     let mut ssids = HashSet::new();
-    let ssid_regex = Regex::new(r"^\s*SSID\s+\d+\s*:\s*(.+)$").map_err(|e| format!("Regex error: {}", e))?;
+    let ssid_regex =
+        Regex::new(r"^\s*SSID\s+\d+\s*:\s*(.+)$").map_err(|e| format!("Regex error: {}", e))?;
 
     for line in output.lines() {
         if let Some(caps) = ssid_regex.captures(line) {
