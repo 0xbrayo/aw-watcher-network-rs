@@ -23,7 +23,6 @@ struct AppConfig {
     polling_interval: u64,
 
     /// Wi-Fi SSID scanning interval in seconds
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[serde(default = "default_wifi_scan_interval")]
     wifi_scan_interval: u64,
 }
@@ -32,24 +31,17 @@ fn default_polling_interval() -> u64 {
     5
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn default_wifi_scan_interval() -> u64 {
     300 // 5 minutes
 }
 
 impl AppConfig {
     fn new() -> Result<Self, ConfigError> {
-        // Start with default configuration
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let default_config = Self {
             polling_interval: default_polling_interval(),
             wifi_scan_interval: default_wifi_scan_interval(),
         };
 
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        let default_config = Self {
-            polling_interval: default_polling_interval(),
-        };
 
         // Get the configuration directory
         let config_path = if let Some(config_dir) = config_dir() {
@@ -95,16 +87,11 @@ fn main() {
         Ok(config) => config,
         Err(e) => {
             eprintln!("Error loading configuration: {}", e);
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
             let config = AppConfig {
                 polling_interval: default_polling_interval(),
                 wifi_scan_interval: default_wifi_scan_interval(),
             };
 
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-            let config = AppConfig {
-                polling_interval: default_polling_interval(),
-            };
 
             config
         }
@@ -119,23 +106,19 @@ fn main() {
     };
 
     let bucket_id = format!("aw-watcher-network_{}", hostname);
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let wifi_bucket_id = format!("aw-watcher-wifi_{}", hostname);
     let event_type = "network-status";
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let wifi_event_type = "wifi-status";
 
     println!(
         "Starting aw-watcher-network-rs with polling interval of {} seconds",
         polling_interval
     );
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     println!(
         "Wi-Fi SSID scanning interval: {} seconds",
         config.wifi_scan_interval
     );
     println!("Using bucket ID: {}", bucket_id);
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     println!("Using Wi-Fi bucket ID: {}", wifi_bucket_id);
 
     let client = AwClient::new("localhost", 5600, "aw-watcher-network").unwrap();
@@ -145,13 +128,11 @@ fn main() {
         .create_bucket_simple(&bucket_id, event_type)
         .expect("Failed to create network bucket");
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     client
         .create_bucket_simple(&wifi_bucket_id, wifi_event_type)
         .expect("Failed to create Wi-Fi bucket");
 
     // Start Wi-Fi SSID scanning thread on supported platforms
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let wifi_scan_interval = config.wifi_scan_interval;
         // Create a new client instance for the WiFi thread since AwClient doesn't implement Clone
@@ -238,7 +219,6 @@ fn check_network_connectivity() -> bool {
 }
 
 /// Function to watch for Wi-Fi SSIDs in a separate thread
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn wifi_ssid_watcher(
     scan_interval: u64,
     client: AwClient,
@@ -320,7 +300,6 @@ fn wifi_ssid_watcher(
 }
 
 /// Get available Wi-Fi SSIDs using platform-specific commands
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn get_wifi_ssids() -> Result<(Option<String>, Vec<String>), String> {
     #[cfg(target_os = "macos")]
     {
@@ -330,6 +309,10 @@ fn get_wifi_ssids() -> Result<(Option<String>, Vec<String>), String> {
     #[cfg(target_os = "linux")]
     {
         get_wifi_ssids_linux()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        get_wifi_ssids_windows()
     }
 }
 
@@ -624,4 +607,61 @@ fn parse_wifi_output_linux(output: &str) -> Result<(Option<String>, Vec<String>)
     ssids_vec.sort();
 
     Ok((connected_ssid, ssids_vec))
+}
+
+// Windows
+#[cfg(target_os = "windows")]
+fn get_wifi_ssids_windows() -> Result<(Option<String>, Vec<String>), String> {
+    let connected_output = Command::new("powershell")
+        .args(&["-Command", "netsh wlan show interfaces"])
+        .output()
+        .map_err(|e| format!("Failed to run netsh for connected SSID: {}", e))?;
+
+    let connected_str = String::from_utf8_lossy(&connected_output.stdout);
+    let connected_ssid = parse_connected_ssid_windows(&connected_str);
+
+    let scan_output = Command::new("powershell")
+        .args(&["-Command", "netsh wlan show networks"])
+        .output()
+        .map_err(|e| format!("Failed to run netsh for networks: {}", e))?;
+
+    let scan_str = String::from_utf8_lossy(&scan_output.stdout);
+    let ssids = parse_wifi_output_windows(&scan_str)?;
+
+    Ok((connected_ssid, ssids))
+}
+
+#[cfg(target_os = "windows")]
+fn parse_connected_ssid_windows(output: &str) -> Option<String> {
+    for line in output.lines() {
+        if line.trim_start().starts_with("SSID") && !line.contains("BSSID") {
+            let parts: Vec<&str> = line.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                let ssid = parts[1].trim();
+                if !ssid.is_empty() && ssid != "N/A" {
+                    return Some(ssid.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn parse_wifi_output_windows(output: &str) -> Result<Vec<String>, String> {
+    let mut ssids = HashSet::new();
+    let ssid_regex = Regex::new(r"^\s*SSID\s+\d+\s*:\s*(.+)$").map_err(|e| format!("Regex error: {}", e))?;
+
+    for line in output.lines() {
+        if let Some(caps) = ssid_regex.captures(line) {
+            let ssid = caps[1].trim();
+            if !ssid.is_empty() {
+                ssids.insert(ssid.to_string());
+            }
+        }
+    }
+
+    let mut ssids_vec: Vec<String> = ssids.into_iter().collect();
+    ssids_vec.sort();
+    Ok(ssids_vec)
 }
