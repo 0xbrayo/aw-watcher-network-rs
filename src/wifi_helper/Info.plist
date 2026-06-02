@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>aw-wifi-helper</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.activitywatch.aw-wifi-helper</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>aw-wifi-helper</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>aw-watcher-network needs location access to read Wi-Fi network names (SSIDs). This is required by macOS privacy policy since macOS 14.</string>
+</dict>
+</plist>

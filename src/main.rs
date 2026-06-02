@@ -10,8 +10,9 @@ use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::fs::{create_dir_all, write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, sleep};
 use std::time::{Duration, Instant};
 
@@ -66,10 +67,10 @@ impl AppConfig {
         let mut builder = Config::builder();
 
         // Add the config file if it exists
-        if let Some(path) = config_path {
-            if path.exists() {
-                builder = builder.add_source(File::from(path));
-            }
+        if let Some(path) = config_path
+            && path.exists()
+        {
+            builder = builder.add_source(File::from(path));
         }
 
         // Build and deserialize the configuration
@@ -204,12 +205,11 @@ fn check_network_connectivity() -> bool {
 
     for target in targets {
         // Parse the address and attempt to establish a connection
-        if let Ok(mut addrs) = target.to_socket_addrs() {
-            if let Some(addr) = addrs.next() {
-                if TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok() {
-                    return true;
-                }
-            }
+        if let Ok(mut addrs) = target.to_socket_addrs()
+            && let Some(addr) = addrs.next()
+            && TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok()
+        {
+            return true;
         }
     }
     false
@@ -315,160 +315,245 @@ fn get_wifi_ssids() -> Result<(Option<String>, Vec<String>), String> {
 
 #[cfg(target_os = "macos")]
 fn get_wifi_ssids_macos() -> Result<(Option<String>, Vec<String>), String> {
-    // Check if Wi-Fi is enabled
+    // Try the CoreWLAN Swift helper first (the only reliable path on macOS 14+)
+    if let Some(result) = try_wifi_helper() {
+        return Ok(result);
+    }
+
+    // Legacy fallback: networksetup + airport (both redacted on macOS 14+, but kept
+    // for older systems or when the helper hasn't been built)
+    let wifi_device = get_macos_wifi_device()?;
+
     let wifi_status = Command::new("networksetup")
-        .args(["-getairportpower", "en0"])
+        .args(["-getairportpower", &wifi_device])
         .output()
         .map_err(|e| format!("Failed to check Wi-Fi status: {}", e))?;
-
     let status_str = String::from_utf8_lossy(&wifi_status.stdout);
     let wifi_enabled = status_str.contains("On");
 
     let mut wifi_was_disabled = false;
-
-    // Turn on Wi-Fi if it's off
     if !wifi_enabled {
         wifi_was_disabled = true;
         Command::new("networksetup")
-            .args(["-setairportpower", "en0", "on"])
+            .args(["-setairportpower", &wifi_device, "on"])
             .output()
             .map_err(|e| format!("Failed to enable Wi-Fi: {}", e))?;
-
-        // Wait a moment for Wi-Fi to initialize
         sleep(Duration::from_secs(2));
     }
 
-    // Use system_profiler to get Wi-Fi information
-    let scan_output = Command::new("system_profiler")
-        .args(["SPAirPortDataType"])
+    let connected_output = Command::new("networksetup")
+        .args(["-getairportnetwork", &wifi_device])
         .output()
-        .map_err(|e| format!("Failed to scan Wi-Fi networks: {}", e))?;
+        .map_err(|e| format!("Failed to get current Wi-Fi network: {}", e))?;
+    let connected_str = String::from_utf8_lossy(&connected_output.stdout);
+    let connected_ssid = parse_connected_ssid_macos(&connected_str);
 
-    // Restore previous Wi-Fi state if it was disabled
-    if wifi_was_disabled {
-        Command::new("networksetup")
-            .args(["-setairportpower", "en0", "off"])
-            .output()
-            .ok(); // Ignore errors here
+    let mut ssids: Vec<String> = Vec::new();
+    if let Some(ref ssid) = connected_ssid {
+        ssids.push(ssid.clone());
     }
 
-    // Parse the output
-    let output_str = String::from_utf8_lossy(&scan_output.stdout);
-    parse_wifi_output_macos(&output_str)
+    // airport -s is deprecated since macOS 14.4 and only emits a warning; skip if that's all we get
+    let airport_path =
+        "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
+    if Path::new(airport_path).exists()
+        && let Ok(out) = Command::new(airport_path).args(["-s"]).output()
+    {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let is_only_warning = stdout.to_ascii_lowercase().contains("deprecated")
+            && stdout.lines().filter(|l| !l.trim().is_empty()).count() <= 3;
+        if out.status.success()
+            && !is_only_warning
+            && let Ok(list) = parse_airport_scan_macos(&stdout)
+        {
+            let mut set = std::collections::BTreeSet::new();
+            for s in ssids.iter() {
+                set.insert(s.clone());
+            }
+            for s in list {
+                set.insert(s);
+            }
+            ssids = set.into_iter().collect();
+        }
+    }
+
+    if wifi_was_disabled {
+        Command::new("networksetup")
+            .args(["-setairportpower", &wifi_device, "off"])
+            .output()
+            .ok();
+    }
+
+    Ok((connected_ssid, ssids))
+}
+
+/// Locate `aw-wifi-helper.app`: check the stable user install path first, then
+/// fall back to a bundle alongside the main executable.
+#[cfg(target_os = "macos")]
+fn find_wifi_helper_app() -> Option<std::path::PathBuf> {
+    // 1. Stable install: ~/Library/Application Support/aw-watcher-network/
+    if let Some(home) = std::env::var_os("HOME") {
+        let stable = std::path::PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("aw-watcher-network")
+            .join("aw-wifi-helper.app");
+        if stable.exists() {
+            return Some(stable);
+        }
+    }
+    // 2. Same directory as the running binary
+    let exe_dir = std::env::current_exe().ok()?;
+    let alongside = exe_dir.parent()?.join("aw-wifi-helper.app");
+    if alongside.exists() {
+        return Some(alongside);
+    }
+    None
+}
+
+/// Call the bundled Swift CoreWLAN helper via `open -W` and parse its JSON output.
+///
+/// We launch through LaunchServices (`open -W`) rather than executing the binary
+/// directly. This gives the helper a proper user-session context so macOS can
+/// display the Location Services authorization dialog and persist the TCC grant.
+/// The helper writes its JSON result to a temp file (passed as argv[1]).
+#[cfg(target_os = "macos")]
+fn try_wifi_helper() -> Option<(Option<String>, Vec<String>)> {
+    let app_bundle = find_wifi_helper_app()?;
+
+    // Temp file for the helper to write its JSON output into
+    let tmp_out = std::env::temp_dir().join(format!("aw-wifi-{}.json", std::process::id()));
+
+    let (tx, rx) = mpsc::channel();
+    let bundle = app_bundle.clone();
+    let tmp = tmp_out.clone();
+    thread::spawn(move || {
+        // `open -W -F <app> --args <output_path>`
+        //   -W: wait for the app to quit before returning
+        //   -F: always open a fresh instance (don't reuse a running one)
+        let result = Command::new("open")
+            .args(["-W", "-F"])
+            .arg(&bundle)
+            .arg("--args")
+            .arg(&tmp)
+            .output();
+        let _ = tx.send(result);
+    });
+
+    let open_result = rx.recv_timeout(Duration::from_secs(40));
+    let json = std::fs::read_to_string(&tmp_out);
+    let _ = std::fs::remove_file(&tmp_out);
+
+    match open_result {
+        Err(_) => {
+            eprintln!("Wi-Fi helper timed out");
+            return None;
+        }
+        Ok(Err(e)) => {
+            eprintln!("Wi-Fi helper launch error: {}", e);
+            return None;
+        }
+        Ok(Ok(_)) => {}
+    }
+
+    parse_wifi_helper_output(&json.ok()?)
 }
 
 #[cfg(target_os = "macos")]
-fn parse_wifi_output_macos(output: &str) -> Result<(Option<String>, Vec<String>), String> {
-    // Use a regex to find SSIDs in the system_profiler output
-    // This pattern looks for indented lines that end with a colon, following Network Information sections
-    let ssid_regex =
-        Regex::new(r"(?m)^\s+(.*?):\s*$").map_err(|e| format!("Invalid regex: {}", e))?;
+fn parse_wifi_helper_output(json: &str) -> Option<(Option<String>, Vec<String>)> {
+    let v: Value = serde_json::from_str(json.trim()).ok()?;
+    let connected = v
+        .get("connected")
+        .and_then(|c| c.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let networks = v
+        .get("networks")
+        .and_then(|n| n.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some((connected, networks))
+}
 
-    // Known section headers that aren't SSIDs
-    let non_ssids = HashSet::from([
-        "Current Network Information",
-        "Other Local Wi-Fi Networks",
-        "PHY Mode",
-        "Channel",
-        "Country Code",
-        "Network Type",
-        "Security",
-        "Signal / Noise",
-        "Transmit Rate",
-        "MCS Index",
-        "Software Versions",
-        "CoreWLAN",
-        "CoreWLANKit",
-        "Menu Extra",
-        "System Information",
-        "IO80211 Family",
-        "Diagnostics",
-        "AirPort Utility",
-    ]);
-
-    // Known interfaces that aren't SSIDs
-    let non_ssid_interfaces = HashSet::from([
-        "awdl0",
-        "llw0",
-        "en0",
-        "en1",
-        "en2",
-        "en3",
-        "en4",
-        "en5",
-        "Wi-Fi",
-        "Interfaces",
-        "Card Type",
-        "Firmware Version",
-        "MAC Address",
-        "Locale",
-        "Country Code",
-        "Supported PHY Modes",
-        "Supported Channels",
-        "Wake On Wireless",
-        "AirDrop",
-        "Auto Unlock",
-        "Status",
-    ]);
-
-    // Collect unique SSIDs
-    let mut ssids = HashSet::new();
-    let mut current_ssid: Option<String> = None;
-    let mut in_current_network_section = false;
-
-    // Use regex to extract potential SSIDs
-    for line in output.lines() {
-        // Check if we're entering the current network section
-        if line.contains("Current Network Information:") {
-            in_current_network_section = true;
+#[cfg(target_os = "macos")]
+fn get_macos_wifi_device() -> Result<String, String> {
+    let output = Command::new("networksetup")
+        .args(["-listallhardwareports"])
+        .output()
+        .map_err(|e| format!("Failed to list hardware ports: {}", e))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let lines = text.lines();
+    let mut last_was_wifi = false;
+    for line in lines {
+        if line.trim().starts_with("Hardware Port: Wi-Fi") {
+            last_was_wifi = true;
             continue;
-        } else if line.contains("Other Local Wi-Fi Networks:") {
-            in_current_network_section = false;
         }
-
-        // Process lines in the current section
-        if in_current_network_section {
-            let trimmed = line.trim();
-            if trimmed.ends_with(':') {
-                let potential_ssid = trimmed.trim_end_matches(':').trim();
-                if !potential_ssid.is_empty()
-                    && !non_ssids.contains(potential_ssid)
-                    && !non_ssid_interfaces.contains(potential_ssid)
-                    && !potential_ssid.starts_with("en")
-                {
-                    // Found the connected SSID
-                    current_ssid = Some(potential_ssid.to_string());
-                    // Also add to the list of available SSIDs
-                    ssids.insert(potential_ssid.to_string());
+        if last_was_wifi && line.trim().starts_with("Device:") {
+            let parts: Vec<&str> = line.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                let dev = parts[1].trim().to_string();
+                if !dev.is_empty() {
+                    return Ok(dev);
                 }
             }
         }
-    }
-
-    // Now collect all SSIDs from the entire output
-    for cap in ssid_regex.captures_iter(output) {
-        if let Some(m) = cap.get(1) {
-            let potential_ssid = m.as_str().trim();
-
-            // Skip if it's a known non-SSID
-            if potential_ssid.is_empty()
-                || non_ssids.contains(potential_ssid)
-                || non_ssid_interfaces.contains(potential_ssid)
-                || potential_ssid.starts_with("en")
-            {
-                continue;
-            }
-
-            // Found an SSID
-            ssids.insert(potential_ssid.to_string());
+        if line.trim().is_empty() {
+            last_was_wifi = false;
         }
     }
+    // Fallback to en0 if not found
+    Ok("en0".to_string())
+}
 
-    // Convert to sorted Vec
-    let mut ssids_vec: Vec<String> = ssids.into_iter().collect();
-    ssids_vec.sort();
+#[cfg(target_os = "macos")]
+fn parse_connected_ssid_macos(output: &str) -> Option<String> {
+    // Expected: "Current Wi-Fi Network: <SSID>"
+    for line in output.lines() {
+        if let Some(rest) = line.strip_prefix("Current Wi-Fi Network:") {
+            let ssid = rest.trim();
+            if !ssid.is_empty() && !ssid.to_lowercase().contains("redacted") {
+                return Some(ssid.to_string());
+            }
+        }
+    }
+    None
+}
 
-    Ok((current_ssid, ssids_vec))
+#[cfg(target_os = "macos")]
+fn parse_airport_scan_macos(output: &str) -> Result<Vec<String>, String> {
+    // airport -s prints a table; SSID is the first column (can contain spaces)
+    // We parse by taking characters up to the RSSI column start when possible, otherwise split on two+ spaces
+    let split_re = Regex::new(r"\s{2,}").map_err(|e| format!("Regex error: {}", e))?;
+    let mut ssids = HashSet::new();
+    for (idx, line) in output.lines().enumerate() {
+        // Skip header line(s)
+        if idx == 0 && line.to_ascii_lowercase().contains("ssid") && line.contains("bssid") {
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Heuristic: SSID is before two or more spaces followed by a hex bssid
+        // Split by two or more spaces
+        let parts: Vec<&str> = split_re.split(trimmed).collect();
+        if !parts.is_empty() {
+            let ssid = parts[0].trim();
+            if !ssid.is_empty() && !ssid.to_lowercase().contains("redacted") {
+                ssids.insert(ssid.to_string());
+            }
+        }
+    }
+    let mut v: Vec<String> = ssids.into_iter().collect();
+    v.sort();
+    Ok(v)
 }
 
 #[cfg(target_os = "linux")]
